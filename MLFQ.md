@@ -153,8 +153,8 @@ This allows user programs to measure their actual CPU usage, distinct from wall-
 ## Documentation
 
 For complete design details, evaluation methodology, and implementation discussion, see:
-- `../documentation/FINAL_PROJECT_REPORT.pdf` - Full project report
-- `../documentation/BENCHMARK_ANALYSIS.md` - Detailed benchmark analysis
+- `FINAL_PROJECT_REPORT.pdf` - Full project report
+- `BENCHMARK_ANALYSIS.md` - Detailed benchmark analysis
 
 ## Author
 
