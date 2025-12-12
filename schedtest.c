@@ -1,27 +1,21 @@
 // schedtest.c - Scheduler Benchmark Program
-// Tests CPU-bound and I/O-bound process performance
-// Compatible with both Round-Robin and MLFQ schedulers
+// Works on both Round-Robin (master) and MLFQ (mlfq branch) schedulers
+// Uses only uptime() for fair comparison between schedulers
 
 #include "types.h"
 #include "stat.h"
 #include "user.h"
 
-#define NUM_CPU_PROCS 3    // Number of CPU-bound processes
-#define NUM_IO_PROCS  3    // Number of I/O-bound processes
-#define CPU_ITERATIONS 500000  // Work units for CPU-bound
-#define IO_ITERATIONS  20      // Iterations for I/O-bound (with sleeps)
-#define IO_SLEEP_TICKS 2       // Ticks to sleep between I/O iterations
+// Test configuration - adjust these to vary workload
+#define NUM_CPU_PROCS     3       // Number of CPU-bound processes
+#define NUM_IO_PROCS      3       // Number of I/O-bound processes
+#define CPU_ITERATIONS    500000  // Work units for CPU-bound
+#define IO_ITERATIONS     20      // Iterations for I/O-bound (with sleeps)
+#define IO_SLEEP_TICKS    2       // Ticks to sleep between I/O iterations
 
-// Shared completion tracking via exit codes isn't possible,
-// so we'll have parent track child completion times
-
-struct proc_stats {
-  int pid;
-  int type;        // 0 = CPU-bound, 1 = I/O-bound
-  int start_time;
-  int end_time;
-  int turnaround;
-};
+// Process types
+#define TYPE_CPU 0
+#define TYPE_IO  1
 
 // CPU-bound workload: pure computation
 void
@@ -58,7 +52,7 @@ io_work(int id)
     // Sleep to simulate I/O wait
     sleep(IO_SLEEP_TICKS);
 
-    // Simulate I/O completion - print progress
+    // Print progress occasionally
     if (i % 5 == 0)
       printf(1, "[I/O %d] iteration %d/%d\n", id, i, IO_ITERATIONS);
   }
@@ -71,10 +65,14 @@ int
 main(int argc, char *argv[])
 {
   int i;
-  int pids[NUM_CPU_PROCS + NUM_IO_PROCS];
-  int types[NUM_CPU_PROCS + NUM_IO_PROCS];  // 0=CPU, 1=IO
-  int start_times[NUM_CPU_PROCS + NUM_IO_PROCS];
   int total_procs = NUM_CPU_PROCS + NUM_IO_PROCS;
+
+  // Arrays to track process info
+  int pids[NUM_CPU_PROCS + NUM_IO_PROCS];
+  int types[NUM_CPU_PROCS + NUM_IO_PROCS];
+  int start_times[NUM_CPU_PROCS + NUM_IO_PROCS];
+  int end_times[NUM_CPU_PROCS + NUM_IO_PROCS];
+
   int test_start_time, test_end_time;
 
   printf(1, "\n========================================\n");
@@ -89,17 +87,16 @@ main(int argc, char *argv[])
 
   test_start_time = uptime();
 
-  // Fork CPU-bound processes first
+  // Fork CPU-bound processes
   for (i = 0; i < NUM_CPU_PROCS; i++) {
     start_times[i] = uptime();
-    types[i] = 0;  // CPU-bound
+    types[i] = TYPE_CPU;
     pids[i] = fork();
     if (pids[i] == 0) {
-      // Child process
       cpu_work(i);
       // Never returns
     } else if (pids[i] < 0) {
-      printf(1, "Fork failed!\n");
+      printf(1, "ERROR: Fork failed for CPU process %d!\n", i);
       exit();
     }
   }
@@ -108,24 +105,21 @@ main(int argc, char *argv[])
   for (i = 0; i < NUM_IO_PROCS; i++) {
     int idx = NUM_CPU_PROCS + i;
     start_times[idx] = uptime();
-    types[idx] = 1;  // I/O-bound
+    types[idx] = TYPE_IO;
     pids[idx] = fork();
     if (pids[idx] == 0) {
-      // Child process
       io_work(i);
       // Never returns
     } else if (pids[idx] < 0) {
-      printf(1, "Fork failed!\n");
+      printf(1, "ERROR: Fork failed for I/O process %d!\n", i);
       exit();
     }
   }
 
-  printf(1, "\nAll %d processes spawned. Waiting for completion...\n\n", total_procs);
+  printf(1, "All %d processes spawned. Waiting for completion...\n\n", total_procs);
 
   // Wait for all children and record completion times
-  int end_times[NUM_CPU_PROCS + NUM_IO_PROCS];
   int completed = 0;
-
   while (completed < total_procs) {
     int finished_pid = wait();
     int finish_time = uptime();
@@ -162,12 +156,12 @@ main(int argc, char *argv[])
 
   for (i = 0; i < total_procs; i++) {
     int turnaround = end_times[i] - start_times[i];
-    char *type_str = types[i] == 0 ? "CPU-bound" : "I/O-bound";
+    char *type_str = types[i] == TYPE_CPU ? "CPU-bound" : "I/O-bound";
 
     printf(1, "%d     %s   %d      %d      %d ticks\n", 
            pids[i], type_str, start_times[i], end_times[i], turnaround);
 
-    if (types[i] == 0) {
+    if (types[i] == TYPE_CPU) {
       cpu_total_turnaround += turnaround;
       cpu_count++;
     } else {
