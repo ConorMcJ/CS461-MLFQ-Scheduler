@@ -7,8 +7,8 @@
 #include "user.h"
 
 // Test configuration - adjust these to vary workload
-#define NUM_CPU_PROCS     3       // Number of CPU-bound processes
-#define NUM_IO_PROCS      3       // Number of I/O-bound processes
+#define NUM_CPU_PROCS     15       // Number of CPU-bound processes
+#define NUM_IO_PROCS      15       // Number of I/O-bound processes
 #define CPU_ITERATIONS    500000  // Work units for CPU-bound
 #define IO_ITERATIONS     20      // Iterations for I/O-bound (with sleeps)
 #define IO_SLEEP_TICKS    2       // Ticks to sleep between I/O iterations
