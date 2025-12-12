@@ -12,6 +12,19 @@ struct {
   struct proc proc[NPROC];
 } ptable;
 
+// Time slice allocations per queue level (in timer ticks)
+// Each tick is usually ~10ms
+int time_slices[NQUEUE] = {5, 10, 20, 40};
+
+// MLFQ debug setting (set to 1 for verbose output; otherwise, 0)
+#define MLFQ_DEBUG 1
+
+struct {
+  struct proc *queue_head[NQUEUE];
+  struct proc *queue_tail[NQUEUE];
+  uint ticks_since_boost;     // Ticks since last priority boost
+} mlfq;
+
 static struct proc *initproc;
 
 int nextpid = 1;
@@ -24,6 +37,145 @@ void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+
+  // Initialize MLFQ queues
+  for (int i = 0; i < NQUEUE; i++) {
+    mlfq.queue_head[i] = 0;
+    mlfq.queue_tail[i] = 0;
+  }
+  mlfq.ticks_since_boost = 0;
+}
+
+// Add a process to the end of its priority queue
+// Must be called with ptable.lock held
+static void
+enqueue_process(struct proc *p)
+{
+  int queue_level;
+
+  // Validate priority
+  if (p->priority < 0 || p->priority >= NQUEUE)
+    panic("enqueue_process: invalid priority");
+
+  queue_level = p->priority;
+  p->queue_next = 0;
+
+  if (mlfq.queue_tail[queue_level] == 0) {
+    mlfq.queue_head[queue_level] = p;
+    mlfq.queue_tail[queue_level] = p;
+  } else {
+    mlfq.queue_tail[queue_level]->queue_next = p;
+    mlfq.queue_tail[queue_level] = p;
+  }
+}
+
+// Remove and return the first process from a given priority queue
+// Return 0 if queue is empty
+// Must be called with ptable.lock held
+static struct proc*
+dequeue_process(int queue_level)
+{
+  if (queue_level < 0 || queue_level >= NQUEUE)
+    panic("dequeue_process: invalid queue level");
+
+  struct proc *p = mlfq.queue_head[queue_level];
+  if (p == 0)
+    return 0;  // Queue is empty
+
+  // Remove from head
+  mlfq.queue_head[queue_level] = p->queue_next;
+  if (mlfq.queue_head[queue_level] == 0)
+    mlfq.queue_tail[queue_level] = 0;  // Queue is now empty
+
+  p->queue_next = 0;  // Detatch from queue
+  return p;
+}
+
+// Remove a specific process from its priority queue
+// Used when process state changes from `RUNNABLE`
+// Must be called with ptable.lock held
+static void
+remove_from_queue(struct proc *p)
+{
+  struct proc *current, *prev;
+  int queue_level = p->priority;
+
+  if (queue_level < 0 || queue_level >= NQUEUE)
+    return;  // Invalid queue
+
+  prev = 0;
+  for (current = mlfq.queue_head[queue_level]; current != 0; current = current->queue_next) {
+    if (current == p) {
+      if (prev == 0) {
+        // p is at head
+        mlfq.queue_head[queue_level] = p->queue_next;
+        if (mlfq.queue_head[queue_level] == 0)
+          mlfq.queue_tail[queue_level] = 0;
+      } else {
+        // p is in middle or end
+        prev->queue_next = p->queue_next;
+        if (p->queue_next == 0)
+          mlfq.queue_tail[queue_level] = prev;  // p was at tail
+      }
+      p->queue_next = 0;
+      return;
+    }
+    prev = current;
+  }
+}
+
+// Finds the highest priority level with a runnable process
+// Returns queue level (0 to NQUEUE-1), or -1 if all queues empty
+// Must be called with ptable.lock held
+static int
+find_nonempty_queue(void)
+{
+  int i;
+  for (i = 0; i < NQUEUE; i++) {
+    if (mlfq.queue_head[i] != 0)
+      return i;
+  }
+  return -1;
+}
+
+// Boost all processes' priorities in the MLFQ to highest priority
+// This prevents starvation on low-priority processes
+// Must be called with ptable.lock held
+static void
+boost_all_priorities(void)
+{
+  if (MLFQ_DEBUG)
+    cprintf("BOOST: resetting all priorities\n");
+  int i;
+  struct proc *p;
+  for (i = 0; i < NQUEUE; i++) {
+    mlfq.queue_head[i] = 0;
+    mlfq.queue_tail[i] = 0;
+  }
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == RUNNABLE) {
+      p->priority = 0;
+      p->ticks_used = 0;
+      enqueue_process(p);
+    } else if (p->state == RUNNING) {
+      p->priority = 0;
+      p->ticks_used = 0;
+    }
+  }
+}
+
+// Check if at least `BOOST_ITVL` ticks have passed
+// If true, call `boost_all_processes()`
+void
+check_priority_boost(void)
+{
+  acquire(&ptable.lock);
+  mlfq.ticks_since_boost++;
+  if (mlfq.ticks_since_boost >= BOOST_ITVL) {
+    boost_all_priorities();
+    mlfq.ticks_since_boost = 0;
+  }
+  release(&ptable.lock);
 }
 
 //PAGEBREAK: 32
@@ -49,6 +201,12 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+
+  // Initialize MLFQ fields
+  p->priority = 0;
+  p->ticks_used = 0;
+  p->total_ticks = 0;
+  p->queue_next = 0;
 
   release(&ptable.lock);
 
@@ -103,6 +261,7 @@ userinit(void)
 
   __sync_synchronize();
   p->state = RUNNABLE;
+  enqueue_process(p);
 }
 
 // Grow current process's memory by n bytes.
@@ -164,6 +323,7 @@ fork(void)
 
   __sync_synchronize();
   np->state = RUNNABLE;
+  enqueue_process(np);
 
   return pid;
 }
@@ -210,6 +370,7 @@ exit(void)
 
   // Jump into the scheduler, never to return.
   proc->state = ZOMBIE;
+  remove_from_queue(proc);
   sched();
   panic("zombie exit");
 }
@@ -269,40 +430,38 @@ wait(void)
 void
 scheduler(void)
 {
-  int i = 0;
   struct proc *p;
-  int skipped = 0;
+  int queue_level;
   for(;;){
-    ++i;
     // Enable interrupts on this processor.
     sti();
-    // Loop over process table looking for process to run.
+    // Loop over priority queues from highest to lowest
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE) {
-        skipped++;
-        continue;
+    queue_level = find_nonempty_queue();
+    if (queue_level != -1) {
+      p = dequeue_process(queue_level);
+      if (MLFQ_DEBUG && p != 0)
+        cprintf("CPU%d: running pid=%d pri=%d\n",
+                cpunum(), p->pid, p->priority);
+      if (p != 0 && p->state == RUNNABLE) {
+        // Switch to highest priority process. It is the process's job to release
+        // ptable.lock and then reacquire it before jumping back to us.
+        proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+        swtch(&cpu->scheduler, p->context);
+        switchkvm();
+
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        proc = 0;
       }
-      skipped = 0;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-      swtch(&cpu->scheduler, p->context);
-      switchkvm();
-
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      proc = 0;
     }
     release(&ptable.lock);
-    if (skipped > NPROC) {
+    // If no processes were runnable, halt CPU to save power
+    // CPU will wake on next interrupt
+    if (queue_level == -1)
       hlt();
-      skipped = 0;
-    }
   }
 }
 
@@ -337,7 +496,18 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
+  if (proc->ticks_used >= time_slices[proc->priority]) {
+    int old_priority = proc->priority;
+    if (proc->priority < NQUEUE - 1)
+      proc->priority++;
+    if (MLFQ_DEBUG)
+      cprintf("  yield: pid=%d ticks=%d/%d pri=%d->%d\n",
+              proc->pid, proc->ticks_used, proc->total_ticks,
+              old_priority, proc->priority);
+    proc->ticks_used = 0;  // Reset counter
+  }
   proc->state = RUNNABLE;
+  enqueue_process(proc);
   sched();
   release(&ptable.lock);
 }
@@ -389,6 +559,7 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   proc->chan = chan;
   proc->state = SLEEPING;
+  remove_from_queue(proc);
   sched();
 
   // Tidy up.
@@ -409,9 +580,12 @@ wakeup1(void *chan)
 {
   struct proc *p;
 
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if(p->state == SLEEPING && p->chan == chan) {
       p->state = RUNNABLE;
+      enqueue_process(p);
+    }
+  }
 }
 
 // Wake up all processes sleeping on chan.
@@ -436,8 +610,10 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING) {
         p->state = RUNNABLE;
+        enqueue_process(p);
+      }
       release(&ptable.lock);
       return 0;
     }
@@ -473,7 +649,9 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    cprintf("%d %s %s", p->pid, state, p->name);
+    cprintf("%d %s %s pri=%d ticks=%d/%d",
+            p->pid, state, p->name,
+            p->priority, p->ticks_used, p->total_ticks);
     if(p->state == SLEEPING){
       getstackpcs((addr_t*)p->context->rbp+2, pc);
       for(i=0; i<10 && pc[i] != 0; i++)
