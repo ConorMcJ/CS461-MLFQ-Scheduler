@@ -17,12 +17,12 @@ struct {
 int time_slices[NQUEUE] = {5, 10, 20, 40};
 
 // MLFQ debug setting (set to 1 for verbose output; otherwise, 0)
-#define MLFQ_DEBUG 1
+#define MLFQ_DEBUG 0
 
 struct {
   struct proc *queue_head[NQUEUE];
   struct proc *queue_tail[NQUEUE];
-  uint ticks_since_boost;     // Ticks since last priority boost
+  uint64 ticks_since_boost;     // Ticks since last priority boost
 } mlfq;
 
 static struct proc *initproc;
@@ -501,7 +501,7 @@ yield(void)
     if (proc->priority < NQUEUE - 1)
       proc->priority++;
     if (MLFQ_DEBUG)
-      cprintf("  yield: pid=%d ticks=%d/%d pri=%d->%d\n",
+      cprintf("  yield: pid=%d ticks=%lu/%lu pri=%d->%d\n",
               proc->pid, proc->ticks_used, proc->total_ticks,
               old_priority, proc->priority);
     proc->ticks_used = 0;  // Reset counter
@@ -649,7 +649,7 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    cprintf("%d %s %s pri=%d ticks=%d/%d",
+    cprintf("%d %s %s pri=%d ticks=%lu/%lu",
             p->pid, state, p->name,
             p->priority, p->ticks_used, p->total_ticks);
     if(p->state == SLEEPING){

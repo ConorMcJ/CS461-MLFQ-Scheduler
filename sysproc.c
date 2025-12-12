@@ -87,3 +87,11 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// MLFQ scheduler helper function
+// Returns total clock ticks process has run for
+uint64
+sys_ticks(void)
+{
+  return proc->total_ticks;
+}

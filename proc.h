@@ -63,8 +63,8 @@ struct proc {
   char name[16];               // Process name (debugging)
 
   int priority;                // Current priority level (0 = hightst, NQUEUE-1 = lowest)
-  uint ticks_used;             // Ticks used in current time slice
-  uint total_ticks;            // Total CPU ticks used
+  uint64 ticks_used;             // Ticks used in current time slice
+  uint64 total_ticks;            // Total CPU ticks used
   struct proc *queue_next;     // Next process in priority queue
 };
 
